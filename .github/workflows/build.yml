@@ -212,7 +212,8 @@ jobs:
 
               print(f"header_version={hv} page_size={ps}")
               print(f"kernel={ks} ramdisk={rs} second={ss} dtb={ds}")
-              print(f"cmdline={cl.decode(errors=""replace"")}")
+              cl_str = cl.decode(errors="replace")
+              print("cmdline=" + cl_str)
 
               os.makedirs(out, exist_ok=True)
 
