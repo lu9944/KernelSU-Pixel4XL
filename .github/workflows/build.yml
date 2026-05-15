@@ -1,0 +1,343 @@
+name: Build Kernel and Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+
+permissions:
+  contents: write
+
+env:
+  KERNELSU_COMMIT: 3f341a4e3a80c651e3d8f3bbf1070e7768a44cb8
+  FACTORY_IMAGE_URL: https://dl.google.com/dl/android/aosp/coral-tp1a.220624.014-factory-8f60813e.zip
+  FACTORY_IMAGE_MIRROR: https://googledownloads.cn/dl/android/aosp/coral-tp1a.220624.014-factory-8f60813e.zip
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Set up KernelSU
+        run: |
+          git clone https://github.com/tiann/KernelSU.git KernelSU_tmp
+          cd KernelSU_tmp
+          git fetch origin ${{ env.KERNELSU_COMMIT }} --depth=1
+          git checkout FETCH_HEAD
+          cd ..
+          rm -rf KernelSU
+          mv KernelSU_tmp KernelSU
+          rm -f drivers/kernelsu
+          ln -s ../KernelSU/kernel drivers/kernelsu
+          echo "=== KernelSU setup ==="
+          ls -la drivers/kernelsu
+          ls KernelSU/kernel/ || echo "WARNING: KernelSU/kernel/ not found"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
+            python3 device-tree-compiler lz4 dwarves
+
+      - name: Cache toolchains
+        id: cache-toolchains
+        uses: actions/cache@v4
+        with:
+          path: toolchains
+          key: toolchains-clang-r416183b-gcc49-v2
+
+      - name: Download Clang toolchain
+        if: steps.cache-toolchains.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains/clang
+          cd toolchains/clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/clang-r416183b.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz
+          rm clang.tar.gz
+          cd ../..
+          echo "Clang toolchain ready"
+          toolchains/clang/bin/clang --version
+
+      - name: Download GCC toolchains
+        if: steps.cache-toolchains.outputs.cache-hit != 'true'
+        run: |
+          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 --depth=1 toolchains/gcc-64
+          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 --depth=1 toolchains/gcc-32
+          echo "GCC toolchains ready"
+          toolchains/gcc-64/bin/aarch64-linux-android-gcc --version
+
+      - name: Build kernel
+        run: |
+          export PATH="$(pwd)/toolchains/clang/bin:$(pwd)/toolchains/gcc-64/bin:$(pwd)/toolchains/gcc-32/bin:$PATH"
+          export KBUILD_BUILD_HOST=GitHub-Actions
+          export KBUILD_BUILD_USER=KernelSU
+          export DTC_EXT=$(which dtc)
+          export ARCH=arm64
+
+          echo "=== Generating config ==="
+          make O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld \
+            floral_defconfig
+
+          echo "=== Disabling LTO/CFI ==="
+          scripts/config --file out/.config \
+            -d LTO \
+            -d LTO_CLANG \
+            -d CFI \
+            -d CFI_PERMISSIVE \
+            -d CFI_CLANG
+
+          echo "=== Updating config ==="
+          make O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld \
+            olddefconfig
+
+          echo "=== Building kernel ==="
+          make -j$(nproc) O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld \
+            2>&1 | tee build.log
+
+          echo "=== Build output ==="
+          ls -la out/arch/arm64/boot/Image.lz4 || true
+          ls -la out/arch/arm64/boot/Image.gz || true
+          ls -la out/arch/arm64/boot/Image || true
+          ls -la out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb || true
+
+      - name: Create boot.img
+        run: |
+          KERNEL=""
+          for k in out/arch/arm64/boot/Image.lz4 out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+            if [ -f "$k" ]; then
+              KERNEL="$k"
+              break
+            fi
+          done
+          if [ -z "$KERNEL" ]; then
+            echo "ERROR: No kernel image found!"
+            exit 1
+          fi
+          echo "Using kernel: $KERNEL"
+          echo "KERNEL=$KERNEL" >> $GITHUB_ENV
+
+          DTB=""
+          for d in out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb \
+                   out/arch/arm64/boot/dts/google/qcom-base/sm8150.dtb; do
+            if [ -f "$d" ]; then
+              DTB="$d"
+              break
+            fi
+          done
+          if [ -n "$DTB" ]; then
+            echo "Using DTB: $DTB"
+            echo "DTB=$DTB" >> $GITHUB_ENV
+          fi
+
+          echo "=== Downloading factory image ==="
+          wget -q "$FACTORY_IMAGE_URL" -O factory.zip || \
+          wget -q "$FACTORY_IMAGE_MIRROR" -O factory.zip || \
+          { echo "Failed to download factory image"; exit 1; }
+
+          echo "=== Extracting boot.img ==="
+          unzip -o factory.zip "*/image-*.zip" -d factory_tmp
+          inner_zip=$(find factory_tmp -name "image-*.zip" | head -1)
+          if [ -z "$inner_zip" ]; then
+            echo "ERROR: image zip not found in factory image"
+            ls -la factory_tmp/
+            exit 1
+          fi
+          unzip -o "$inner_zip" "boot.img"
+          rm -rf factory.zip factory_tmp
+
+          echo "Stock boot.img:"
+          ls -la boot.img
+
+          echo "=== Unpacking and repacking boot.img ==="
+          python3 -c '
+          import struct, os, sys
+
+          BOOT_MAGIC = b'"'"'ANDROID!'"'"'
+
+          def align_up(size, alignment):
+              return ((size + alignment - 1) // alignment) * alignment
+
+          def unpack_boot(path, out):
+              with open(path, "rb") as f:
+                  data = f.read()
+              assert data[:8] == BOOT_MAGIC, "Bad magic"
+              ks = struct.unpack_from("<I", data, 8)[0]
+              ka = struct.unpack_from("<I", data, 12)[0]
+              rs = struct.unpack_from("<I", data, 16)[0]
+              ra = struct.unpack_from("<I", data, 20)[0]
+              ss = struct.unpack_from("<I", data, 24)[0]
+              sa = struct.unpack_from("<I", data, 28)[0]
+              ta = struct.unpack_from("<I", data, 32)[0]
+              ps = struct.unpack_from("<I", data, 36)[0]
+              hv = struct.unpack_from("<I", data, 40)[0]
+              ov = struct.unpack_from("<I", data, 44)[0]
+              nm = data[48:64].rstrip(b"\x00")
+              cl = data[64:576].rstrip(b"\x00")
+              ecl = data[608:1632].rstrip(b"\x00")
+              rds = struct.unpack_from("<I", data, 1632)[0] if hv >= 1 else 0
+              rdo = struct.unpack_from("<Q", data, 1636)[0] if hv >= 1 else 0
+              hs = struct.unpack_from("<I", data, 1644)[0] if hv >= 1 else 0
+              ds = struct.unpack_from("<I", data, 1648)[0] if hv >= 2 else 0
+              da = struct.unpack_from("<Q", data, 1652)[0] if hv >= 2 else 0
+
+              print(f"header_version={hv} page_size={ps}")
+              print(f"kernel={ks} ramdisk={rs} second={ss} dtb={ds}")
+              print(f"cmdline={cl.decode(errors=""replace"")}")
+
+              os.makedirs(out, exist_ok=True)
+
+              off = ps
+              with open(f"{out}/kernel", "wb") as f: f.write(data[off:off+ks])
+              off += align_up(ks, ps)
+              with open(f"{out}/ramdisk", "wb") as f: f.write(data[off:off+rs])
+              off += align_up(rs, ps)
+              if ss > 0:
+                  with open(f"{out}/second", "wb") as f: f.write(data[off:off+ss])
+                  off += align_up(ss, ps)
+              if rds > 0:
+                  with open(f"{out}/recovery_dtbo", "wb") as f: f.write(data[off:off+rds])
+                  off += align_up(rds, ps)
+              if ds > 0:
+                  with open(f"{out}/dtb", "wb") as f: f.write(data[off:off+ds])
+
+              hdr = dict(ka=ka, ra=ra, sa=sa, ta=ta, ps=ps, hv=hv, ov=ov,
+                         nm=nm, cl=cl, ecl=ecl, da=da)
+              return hdr
+
+          def pack_boot(out_dir, new_kernel, new_dtb, output, hdr):
+              with open(new_kernel, "rb") as f: nk = f.read()
+              with open(f"{out_dir}/ramdisk", "rb") as f: rd = f.read()
+              sc = b""
+              if os.path.exists(f"{out_dir}/second"):
+                  with open(f"{out_dir}/second", "rb") as f: sc = f.read()
+              dt = b""
+              if new_dtb and os.path.exists(new_dtb):
+                  with open(new_dtb, "rb") as f: dt = f.read()
+              elif os.path.exists(f"{out_dir}/dtb"):
+                  with open(f"{out_dir}/dtb", "rb") as f: dt = f.read()
+
+              ps = hdr["ps"]
+              ks = len(nk)
+              rs = len(rd)
+              ss = len(sc)
+              ds = len(dt)
+
+              hdr_buf = bytearray(1660)
+              hdr_buf[0:8] = BOOT_MAGIC
+              struct.pack_into("<I", hdr_buf, 8, ks)
+              struct.pack_into("<I", hdr_buf, 12, hdr["ka"])
+              struct.pack_into("<I", hdr_buf, 16, rs)
+              struct.pack_into("<I", hdr_buf, 20, hdr["ra"])
+              struct.pack_into("<I", hdr_buf, 24, ss)
+              struct.pack_into("<I", hdr_buf, 28, hdr["sa"])
+              struct.pack_into("<I", hdr_buf, 32, hdr["ta"])
+              struct.pack_into("<I", hdr_buf, 36, ps)
+              struct.pack_into("<I", hdr_buf, 40, hdr["hv"])
+              struct.pack_into("<I", hdr_buf, 44, hdr["ov"])
+              nm = hdr["nm"][:16]
+              hdr_buf[48:48+len(nm)] = nm
+              cl = hdr["cl"][:512]
+              hdr_buf[64:64+len(cl)] = cl
+              ecl = hdr["ecl"][:1024]
+              hdr_buf[608:608+len(ecl)] = ecl
+              if hdr["hv"] >= 1:
+                  struct.pack_into("<I", hdr_buf, 1632, 0)
+                  struct.pack_into("<Q", hdr_buf, 1636, 0)
+                  struct.pack_into("<I", hdr_buf, 1644, 1660)
+              if hdr["hv"] >= 2:
+                  struct.pack_into("<I", hdr_buf, 1648, ds)
+                  struct.pack_into("<Q", hdr_buf, 1652, hdr["da"])
+
+              with open(output, "wb") as f:
+                  f.write(bytes(hdr_buf))
+                  f.write(b"\x00" * (ps - len(hdr_buf)))
+                  f.write(nk)
+                  f.write(b"\x00" * (align_up(ks, ps) - ks))
+                  f.write(rd)
+                  f.write(b"\x00" * (align_up(rs, ps) - rs))
+                  if ss > 0:
+                      f.write(sc)
+                      f.write(b"\x00" * (align_up(ss, ps) - ss))
+                  if ds > 0:
+                      f.write(dt)
+                      f.write(b"\x00" * (align_up(ds, ps) - ds))
+
+              sz = os.path.getsize(output)
+              print(f"Created {output}: {sz} bytes")
+              print(f"  kernel={ks} ramdisk={rs} second={ss} dtb={ds}")
+
+          hdr = unpack_boot("boot.img", "boot_work")
+          new_dtb = os.environ.get("DTB", "")
+          if not new_dtb: new_dtb = None
+          pack_boot("boot_work", os.environ["KERNEL"], new_dtb, "boot-KernelSU-Pixel4XL.img", hdr)
+          '
+
+          echo "=== Final boot image ==="
+          ls -la boot-KernelSU-Pixel4XL.img
+
+      - name: Upload boot.img artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-KernelSU-Pixel4XL
+          path: boot-KernelSU-Pixel4XL.img
+
+      - name: Get build info
+        id: info
+        run: |
+          KERNEL_VERSION=$(strings out/arch/arm64/boot/Image.lz4 2>/dev/null | grep -m1 "4.14." || echo "4.14.276")
+          DATE=$(date +%Y%m%d)
+          echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "tag=KernelSU-v0.8.1-${DATE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.info.outputs.tag }}
+          name: "KernelSU v0.8.1 for Pixel 4 XL (${{ steps.info.outputs.date }})"
+          body: |
+            ## KernelSU v0.8.1 for Pixel 4 XL (coral)
+
+            - **Kernel**: ${{ steps.info.outputs.kernel_version }}
+            - **Android**: 13 (TP1A.220624.014)
+            - **Device**: Pixel 4 XL (coral) / Pixel 4 (flame)
+            - **Commit**: `${{ github.sha }}`
+
+            ### Flashing
+            ```bash
+            fastboot flash boot boot-KernelSU-Pixel4XL.img
+            ```
+
+            > **Warning**: Make sure you have a backup before flashing.
+          files: boot-KernelSU-Pixel4XL.img
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
