@@ -144,6 +144,7 @@ jobs:
             exit 1
           fi
           echo "Using kernel: $KERNEL"
+          export KERNEL
           echo "KERNEL=$KERNEL" >> $GITHUB_ENV
 
           DTB=""
@@ -156,6 +157,7 @@ jobs:
           done
           if [ -n "$DTB" ]; then
             echo "Using DTB: $DTB"
+            export DTB
             echo "DTB=$DTB" >> $GITHUB_ENV
           fi
 
