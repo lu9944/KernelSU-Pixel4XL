@@ -56,25 +56,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: toolchains
-          key: toolchains-clang-r416183b-gcc49-v2
+          key: toolchains-github-mirrors-v3
 
       - name: Download Clang toolchain
         if: steps.cache-toolchains.outputs.cache-hit != 'true'
         run: |
-          mkdir -p toolchains/clang
-          cd toolchains/clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/clang-r416183b.tar.gz -O clang.tar.gz
-          tar -xf clang.tar.gz
-          rm clang.tar.gz
-          cd ../..
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b -b lineage-20.0 toolchains/clang
           echo "Clang toolchain ready"
           toolchains/clang/bin/clang --version
 
       - name: Download GCC toolchains
         if: steps.cache-toolchains.outputs.cache-hit != 'true'
         run: |
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 --depth=1 toolchains/gcc-64
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 --depth=1 toolchains/gcc-32
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 -b lineage-19.1 toolchains/gcc-64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 -b lineage-20.0 toolchains/gcc-32
           echo "GCC toolchains ready"
           toolchains/gcc-64/bin/aarch64-linux-android-gcc --version
 
