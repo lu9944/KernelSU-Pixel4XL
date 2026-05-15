@@ -69,7 +69,7 @@ jobs:
         if: steps.cache-toolchains.outputs.cache-hit != 'true'
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 -b lineage-19.1 toolchains/gcc-64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 -b lineage-20.0 toolchains/gcc-32
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 -b lineage-19.1 toolchains/gcc-32
           echo "GCC toolchains ready"
           toolchains/gcc-64/bin/aarch64-linux-android-gcc --version
 
