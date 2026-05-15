@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  KERNELSU_COMMIT: 3f341a4e3a80c651e3d8f3bbf1070e7768a44cb8
+  KERNELSU_COMMIT: b766b98513b5a7eb33bc1c4a76b5702bf1288f07
   FACTORY_IMAGE_URL: https://dl.google.com/dl/android/aosp/coral-tp1a.220624.014-factory-8f60813e.zip
   FACTORY_IMAGE_MIRROR: https://googledownloads.cn/dl/android/aosp/coral-tp1a.220624.014-factory-8f60813e.zip
 
@@ -115,20 +115,31 @@ jobs:
             LD=ld.lld \
             Image.lz4
 
-          echo "=== Building DTB ==="
-          make -j$(nproc) O=out \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            LD=ld.lld \
-            arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb || true
+          echo "=== Building DTBs ==="
+          for dtb in \
+            google/qcom-base/sm8150-v2.dtb \
+            google/qcom-base/sm8150.dtb \
+            qcom/sdmmagpie.dtb; do
+            echo "--- Building $dtb ---"
+            make -j$(nproc) O=out \
+              CROSS_COMPILE=aarch64-linux-android- \
+              CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+              CC=clang \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              LD=ld.lld \
+              "$dtb" || echo "WARNING: $dtb build failed"
+          done
 
           echo "=== Build output ==="
           ls -la out/arch/arm64/boot/Image.lz4 || true
           ls -la out/arch/arm64/boot/Image.gz || true
           ls -la out/arch/arm64/boot/Image || true
-          ls -la out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb || true
+          for dtb in \
+            out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb \
+            out/arch/arm64/boot/dts/google/qcom-base/sm8150.dtb \
+            out/arch/arm64/boot/dts/qcom/sdmmagpie.dtb; do
+            ls -la "$dtb" || true
+          done
 
       - name: Create boot.img
         run: |
@@ -144,22 +155,18 @@ jobs:
             exit 1
           fi
           echo "Using kernel: $KERNEL"
-          export KERNEL
-          echo "KERNEL=$KERNEL" >> $GITHUB_ENV
 
-          DTB=""
-          for d in out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb \
-                   out/arch/arm64/boot/dts/google/qcom-base/sm8150.dtb; do
+          DTB_FILES=""
+          for d in \
+            out/arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb \
+            out/arch/arm64/boot/dts/google/qcom-base/sm8150.dtb \
+            out/arch/arm64/boot/dts/qcom/sdmmagpie.dtb; do
             if [ -f "$d" ]; then
-              DTB="$d"
-              break
+              echo "Using DTB: $d"
+              DTB_FILES="$DTB_FILES $d"
             fi
           done
-          if [ -n "$DTB" ]; then
-            echo "Using DTB: $DTB"
-            export DTB
-            echo "DTB=$DTB" >> $GITHUB_ENV
-          fi
+          export DTB_FILES
 
           echo "=== Downloading factory image ==="
           wget -q "$FACTORY_IMAGE_URL" -O factory.zip || \
@@ -180,129 +187,61 @@ jobs:
           echo "Stock boot.img:"
           ls -la boot.img
 
-          echo "=== Unpacking and repacking boot.img ==="
+          echo "=== Repacking boot.img ==="
           python3 -c '
           import struct, os, sys
-
-          BOOT_MAGIC = b'"'"'ANDROID!'"'"'
 
           def align_up(size, alignment):
               return ((size + alignment - 1) // alignment) * alignment
 
-          def unpack_boot(path, out):
-              with open(path, "rb") as f:
-                  data = f.read()
-              assert data[:8] == BOOT_MAGIC, "Bad magic"
-              ks = struct.unpack_from("<I", data, 8)[0]
-              ka = struct.unpack_from("<I", data, 12)[0]
-              rs = struct.unpack_from("<I", data, 16)[0]
-              ra = struct.unpack_from("<I", data, 20)[0]
-              ss = struct.unpack_from("<I", data, 24)[0]
-              sa = struct.unpack_from("<I", data, 28)[0]
-              ta = struct.unpack_from("<I", data, 32)[0]
-              ps = struct.unpack_from("<I", data, 36)[0]
-              hv = struct.unpack_from("<I", data, 40)[0]
-              ov = struct.unpack_from("<I", data, 44)[0]
-              nm = data[48:64].rstrip(b"\x00")
-              cl = data[64:576].rstrip(b"\x00")
-              ecl = data[608:1632].rstrip(b"\x00")
-              rds = struct.unpack_from("<I", data, 1632)[0] if hv >= 1 else 0
-              rdo = struct.unpack_from("<Q", data, 1636)[0] if hv >= 1 else 0
-              hs = struct.unpack_from("<I", data, 1644)[0] if hv >= 1 else 0
-              ds = struct.unpack_from("<I", data, 1648)[0] if hv >= 2 else 0
-              da = struct.unpack_from("<Q", data, 1652)[0] if hv >= 2 else 0
+          KERNEL = os.environ["KERNEL"]
+          DTB_FILES = os.environ.get("DTB_FILES", "").strip().split()
+          STOCK_BOOT = "boot.img"
+          OUTPUT = "boot-KernelSU-Pixel4XL.img"
+          HDR_SIZE = 1660
 
-              print(f"header_version={hv} page_size={ps}")
-              print(f"kernel={ks} ramdisk={rs} second={ss} dtb={ds}")
-              cl_str = cl.decode(errors="replace")
-              print("cmdline=" + cl_str)
+          with open(STOCK_BOOT, "rb") as f:
+              stock = f.read()
 
-              os.makedirs(out, exist_ok=True)
+          assert stock[:8] == b"ANDROID!", "Bad stock boot magic"
+          ps = struct.unpack_from("<I", stock, 36)[0]
+          stock_ks = struct.unpack_from("<I", stock, 8)[0]
+          stock_rs = struct.unpack_from("<I", stock, 16)[0]
 
-              off = ps
-              with open(f"{out}/kernel", "wb") as f: f.write(data[off:off+ks])
-              off += align_up(ks, ps)
-              with open(f"{out}/ramdisk", "wb") as f: f.write(data[off:off+rs])
-              off += align_up(rs, ps)
-              if ss > 0:
-                  with open(f"{out}/second", "wb") as f: f.write(data[off:off+ss])
-                  off += align_up(ss, ps)
-              if rds > 0:
-                  with open(f"{out}/recovery_dtbo", "wb") as f: f.write(data[off:off+rds])
-                  off += align_up(rds, ps)
-              if ds > 0:
-                  with open(f"{out}/dtb", "wb") as f: f.write(data[off:off+ds])
+          print(f"Stock: page_size={ps} kernel={stock_ks} ramdisk={stock_rs}")
 
-              hdr = dict(ka=ka, ra=ra, sa=sa, ta=ta, ps=ps, hv=hv, ov=ov,
-                         nm=nm, cl=cl, ecl=ecl, da=da)
-              return hdr
+          ramdisk_off = ps + align_up(stock_ks, ps)
+          ramdisk = stock[ramdisk_off:ramdisk_off + stock_rs]
+          print(f"Extracted ramdisk: {len(ramdisk)} bytes")
 
-          def pack_boot(out_dir, new_kernel, new_dtb, output, hdr):
-              with open(new_kernel, "rb") as f: nk = f.read()
-              with open(f"{out_dir}/ramdisk", "rb") as f: rd = f.read()
-              sc = b""
-              if os.path.exists(f"{out_dir}/second"):
-                  with open(f"{out_dir}/second", "rb") as f: sc = f.read()
-              dt = b""
-              if new_dtb and os.path.exists(new_dtb):
-                  with open(new_dtb, "rb") as f: dt = f.read()
-              elif os.path.exists(f"{out_dir}/dtb"):
-                  with open(f"{out_dir}/dtb", "rb") as f: dt = f.read()
+          with open(KERNEL, "rb") as f:
+              kernel = f.read()
+          print(f"New kernel: {len(kernel)} bytes")
 
-              ps = hdr["ps"]
-              ks = len(nk)
-              rs = len(rd)
-              ss = len(sc)
-              ds = len(dt)
+          dtbs = b""
+          for d in DTB_FILES:
+              with open(d, "rb") as f:
+                  dtbs += f.read()
+          print(f"Combined DTBs: {len(dtbs)} bytes ({len(DTB_FILES)} files)")
 
-              hdr_buf = bytearray(1660)
-              hdr_buf[0:8] = BOOT_MAGIC
-              struct.pack_into("<I", hdr_buf, 8, ks)
-              struct.pack_into("<I", hdr_buf, 12, hdr["ka"])
-              struct.pack_into("<I", hdr_buf, 16, rs)
-              struct.pack_into("<I", hdr_buf, 20, hdr["ra"])
-              struct.pack_into("<I", hdr_buf, 24, ss)
-              struct.pack_into("<I", hdr_buf, 28, hdr["sa"])
-              struct.pack_into("<I", hdr_buf, 32, hdr["ta"])
-              struct.pack_into("<I", hdr_buf, 36, ps)
-              struct.pack_into("<I", hdr_buf, 40, hdr["hv"])
-              struct.pack_into("<I", hdr_buf, 44, hdr["ov"])
-              nm = hdr["nm"][:16]
-              hdr_buf[48:48+len(nm)] = nm
-              cl = hdr["cl"][:512]
-              hdr_buf[64:64+len(cl)] = cl
-              ecl = hdr["ecl"][:1024]
-              hdr_buf[608:608+len(ecl)] = ecl
-              if hdr["hv"] >= 1:
-                  struct.pack_into("<I", hdr_buf, 1632, 0)
-                  struct.pack_into("<Q", hdr_buf, 1636, 0)
-                  struct.pack_into("<I", hdr_buf, 1644, 1660)
-              if hdr["hv"] >= 2:
-                  struct.pack_into("<I", hdr_buf, 1648, ds)
-                  struct.pack_into("<Q", hdr_buf, 1652, hdr["da"])
+          hdr = bytearray(stock[:HDR_SIZE])
+          struct.pack_into("<I", hdr, 8, len(kernel))
+          struct.pack_into("<I", hdr, 16, len(ramdisk))
+          struct.pack_into("<I", hdr, 1648, len(dtbs))
 
-              with open(output, "wb") as f:
-                  f.write(bytes(hdr_buf))
-                  f.write(b"\x00" * (ps - len(hdr_buf)))
-                  f.write(nk)
-                  f.write(b"\x00" * (align_up(ks, ps) - ks))
-                  f.write(rd)
-                  f.write(b"\x00" * (align_up(rs, ps) - rs))
-                  if ss > 0:
-                      f.write(sc)
-                      f.write(b"\x00" * (align_up(ss, ps) - ss))
-                  if ds > 0:
-                      f.write(dt)
-                      f.write(b"\x00" * (align_up(ds, ps) - ds))
+          with open(OUTPUT, "wb") as f:
+              f.write(bytes(hdr))
+              f.write(b"\x00" * (ps - HDR_SIZE))
+              f.write(kernel)
+              f.write(b"\x00" * (align_up(len(kernel), ps) - len(kernel)))
+              f.write(ramdisk)
+              f.write(b"\x00" * (align_up(len(ramdisk), ps) - len(ramdisk)))
+              f.write(dtbs)
+              f.write(b"\x00" * (align_up(len(dtbs), ps) - len(dtbs)))
 
-              sz = os.path.getsize(output)
-              print(f"Created {output}: {sz} bytes")
-              print(f"  kernel={ks} ramdisk={rs} second={ss} dtb={ds}")
-
-          hdr = unpack_boot("boot.img", "boot_work")
-          new_dtb = os.environ.get("DTB", "")
-          if not new_dtb: new_dtb = None
-          pack_boot("boot_work", os.environ["KERNEL"], new_dtb, "boot-KernelSU-Pixel4XL.img", hdr)
+          sz = os.path.getsize(OUTPUT)
+          print(f"Created {OUTPUT}: {sz} bytes")
+          print(f"  kernel={len(kernel)} ramdisk={len(ramdisk)} dtbs={len(dtbs)}")
           '
 
           echo "=== Final boot image ==="
@@ -321,15 +260,15 @@ jobs:
           DATE=$(date +%Y%m%d)
           echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "date=$DATE" >> $GITHUB_OUTPUT
-          echo "tag=KernelSU-v0.8.1-${DATE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "tag=KernelSU-v0.9.5-${DATE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.info.outputs.tag }}
-          name: "KernelSU v0.8.1 for Pixel 4 XL (${{ steps.info.outputs.date }})"
+          name: "KernelSU v0.9.5 for Pixel 4 XL (${{ steps.info.outputs.date }})"
           body: |
-            ## KernelSU v0.8.1 for Pixel 4 XL (coral)
+            ## KernelSU v0.9.5 for Pixel 4 XL (coral)
 
             - **Kernel**: ${{ steps.info.outputs.kernel_version }}
             - **Android**: 13 (TP1A.220624.014)
