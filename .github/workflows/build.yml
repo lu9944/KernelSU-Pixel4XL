@@ -78,7 +78,6 @@ jobs:
           export PATH="$(pwd)/toolchains/clang/bin:$(pwd)/toolchains/gcc-64/bin:$(pwd)/toolchains/gcc-32/bin:$PATH"
           export KBUILD_BUILD_HOST=GitHub-Actions
           export KBUILD_BUILD_USER=KernelSU
-          export DTC_EXT=$(which dtc)
           export ARCH=arm64
 
           echo "=== Generating config ==="
@@ -113,8 +112,7 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            LD=ld.lld \
-            2>&1 | tee build.log
+            LD=ld.lld
 
           echo "=== Build output ==="
           ls -la out/arch/arm64/boot/Image.lz4 || true
