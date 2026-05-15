@@ -112,7 +112,17 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            LD=ld.lld
+            LD=ld.lld \
+            Image.lz4
+
+          echo "=== Building DTB ==="
+          make -j$(nproc) O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld \
+            arch/arm64/boot/dts/google/qcom-base/sm8150-v2.dtb || true
 
           echo "=== Build output ==="
           ls -la out/arch/arm64/boot/Image.lz4 || true
